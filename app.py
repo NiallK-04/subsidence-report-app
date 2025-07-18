@@ -1,19 +1,11 @@
 import streamlit as st
 import requests
-import folium
-from streamlit_folium import st_folium
 from docx import Document
 from datetime import date
 import io
-import os
 from PIL import Image
-from selenium import webdriver
-import chromedriver_autoinstaller
-import time
 import docx.shared
-
-# Ensure Chromedriver is available
-chromedriver_autoinstaller.install()
+import os
 
 # --- Helper functions ---
 def get_coords_from_eircode(eircode, api_key):
@@ -48,32 +40,25 @@ def query_gsi_geology(lat, lon):
         pass
     return "Geological information unavailable."
 
-def capture_map_snapshot(lat, lon, map_html_path, image_path):
-    fmap = folium.Map(location=[lat, lon], zoom_start=16)
-    folium.Marker([lat, lon], tooltip="Property").add_to(fmap)
-    fmap.save(map_html_path)
-
-    options = webdriver.ChromeOptions()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    driver = webdriver.Chrome(options=options)
-    driver.set_window_size(800, 600)
-    driver.get(f'file://{map_html_path}')
-    time.sleep(2)
-    driver.save_screenshot(image_path)
-    driver.quit()
+def get_mapbox_image(lat, lon, mapbox_token):
+    zoom = 16
+    width, height = 600, 400
+    marker = f"pin-l+ff0000({lon},{lat})"
+    url = f"https://api.mapbox.com/styles/v1/mapbox/streets-v11/static/{marker}/{lon},{lat},{zoom}/{width}x{height}@2x?access_token={mapbox_token}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        return Image.open(io.BytesIO(response.content))
+    return None
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="Forensic Subsidence Report Assistant", layout="centered")
-st.title("🛠️ Forensic Subsidence Report Assistant (2025)")
+st.title("ð ï¸ Forensic Subsidence Report Assistant (2025)")
 
 with st.form("subsidence_form"):
     insurer = st.text_input("Insurer Name")
     claim_ref = st.text_input("Claim Reference")
     address = st.text_area("Property Address")
     inspection_date = st.date_input("Date of Inspection", value=date.today())
-
     eircode = st.text_input("Eircode")
 
     historical_photos = st.file_uploader("Upload Historical Photos (optional)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
@@ -81,21 +66,18 @@ with st.form("subsidence_form"):
     submit = st.form_submit_button("Generate Report")
 
 if submit:
-    api_key = st.secrets.get("OPENCAGE_API_KEY", "")
-    if not api_key:
-        st.error("API key not found in Streamlit secrets. Please add OPENCAGE_API_KEY in your app settings.")
+    opencage_key = st.secrets.get("OPENCAGE_API_KEY", "")
+    mapbox_key = st.secrets.get("MAPBOX_API_KEY", "")
+    if not opencage_key or not mapbox_key:
+        st.error("Missing API keys in secrets. Please set OPENCAGE_API_KEY and MAPBOX_API_KEY.")
     else:
-        lat, lon = get_coords_from_eircode(eircode.strip(), api_key)
+        lat, lon = get_coords_from_eircode(eircode.strip(), opencage_key)
         if not lat:
             st.error("Unable to resolve Eircode.")
         else:
             st.success(f"Location resolved: {lat:.5f}, {lon:.5f}")
-
             geology_summary = query_gsi_geology(lat, lon)
-
-            map_html = "/tmp/temp_map.html"
-            map_image = "/tmp/map_image.png"
-            capture_map_snapshot(lat, lon, map_html, map_image)
+            map_image = get_mapbox_image(lat, lon, mapbox_key)
 
             doc = Document()
             doc.add_heading("Subsidence Report", 0)
@@ -109,10 +91,17 @@ if submit:
             doc.add_paragraph(f"Inspection Date: {inspection_date.strftime('%d %B %Y')}")
 
             doc.add_heading("2. Site Location Map", level=1)
-            doc.add_picture(map_image, width=docx.shared.Inches(5.5))
+            if map_image:
+                temp_img_path = "/tmp/mapbox_map.png"
+                map_image.save(temp_img_path)
+                doc.add_picture(temp_img_path, width=docx.shared.Inches(5.5))
+                st.image(map_image, caption="Map Snapshot", use_column_width=True)
+            else:
+                doc.add_paragraph("Map image unavailable.")
 
             doc.add_heading("3. Geological Summary", level=1)
             doc.add_paragraph(geology_summary)
+            st.info(geology_summary)
 
             if historical_photos:
                 doc.add_heading("4. Historical Photos", level=1)
@@ -125,7 +114,4 @@ if submit:
 
             buf = io.BytesIO()
             doc.save(buf)
-            st.download_button("📄 Download Word Report", data=buf.getvalue(), file_name="subsidence_report.docx")
-
-            st.image(map_image, caption="Map Snapshot", use_column_width=True)
-            st.info(geology_summary)
+            st.download_button("ð Download Word Report", data=buf.getvalue(), file_name="subsidence_report.docx")
